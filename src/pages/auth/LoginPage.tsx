@@ -8,7 +8,7 @@ import { useToast } from '../../context/ToastContext';
 import { Logo } from '../../components/ui/Logo';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
-import { Eye, EyeOff, LogIn, Lock, Mail, ShieldCheck } from 'lucide-react';
+import { Eye, EyeOff, LogIn, Lock, Mail } from 'lucide-react';
 
 const loginSchema = z.object({
   email: z.string().email('Please enter a valid email address'),
@@ -31,13 +31,12 @@ export const LoginPage: React.FC = () => {
   const {
     register,
     handleSubmit,
-    setValue,
     formState: { errors },
   } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
     defaultValues: {
-      email: 'alex.morgan@example.com',
-      password: 'Password123!',
+      email: '',
+      password: '',
       rememberMe: true,
     },
   });
@@ -55,11 +54,6 @@ export const LoginPage: React.FC = () => {
     }
   };
 
-  const handleDemoAdminLogin = () => {
-    setValue('email', 'admin.vance@labelcheck.org');
-    setValue('password', 'AdminSecret123!');
-  };
-
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-md w-full space-y-8 bg-white p-8 rounded-3xl border border-slate-200 shadow-xl">
@@ -69,31 +63,6 @@ export const LoginPage: React.FC = () => {
           <p className="text-xs text-slate-500">
             Enter your credentials to access your personalized ingredient safety dashboard.
           </p>
-        </div>
-
-        {/* Demo Fast Login Preset Bar */}
-        <div className="p-3 bg-teal-50 border border-teal-200 rounded-2xl flex items-center justify-between text-xs">
-          <span className="font-semibold text-teal-900">College Demo Quick Login:</span>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setValue('email', 'alex.morgan@example.com');
-                setValue('password', 'Password123!');
-              }}
-              className="px-2 py-1 bg-teal-700 text-white rounded-lg font-bold hover:bg-teal-800 text-[11px]"
-            >
-              User Demo
-            </button>
-            <button
-              type="button"
-              onClick={handleDemoAdminLogin}
-              className="px-2 py-1 bg-amber-700 text-white rounded-lg font-bold hover:bg-amber-800 text-[11px] flex items-center gap-1"
-            >
-              <ShieldCheck className="w-3 h-3" />
-              Admin Demo
-            </button>
-          </div>
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">

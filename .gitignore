@@ -1,0 +1,24 @@
+# Secrets
+.env
+.env.*
+!.env.example
+backend/.env
+src/.env
+backend/*.sqlite3
+backend/uploads/
+
+# Generated files
+node_modules/
+dist/
+*.tsbuildinfo
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+venv/

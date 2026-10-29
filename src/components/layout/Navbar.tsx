@@ -2,7 +2,9 @@ import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Logo } from '../ui/Logo';
 import { Button } from '../ui/Button';
+import { UserAvatar } from '../ui/UserAvatar';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import { 
   Scan, 
   History, 
@@ -18,7 +20,8 @@ import {
 } from 'lucide-react';
 
 export const Navbar: React.FC = () => {
-  const { user, logout, switchRole, isAuthenticated } = useAuth();
+  const { user, logout, isAuthenticated } = useAuth();
+  const { showToast } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
   const [profileOpen, setProfileOpen] = useState(false);
@@ -105,29 +108,6 @@ export const Navbar: React.FC = () => {
 
         {/* Right CTA / Controls */}
         <div className="flex items-center gap-3">
-          {/* Dev Mode Role Switcher */}
-          {isAuthenticated && (
-            <div className="hidden lg:flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-[11px] font-medium text-slate-600">
-              <span className="px-1.5 text-slate-400">Role:</span>
-              <button
-                onClick={() => switchRole('user')}
-                className={`px-2 py-0.5 rounded-lg font-bold transition-all ${
-                  user?.role === 'user' ? 'bg-white text-teal-700 shadow-xs' : 'hover:text-slate-900'
-                }`}
-              >
-                User
-              </button>
-              <button
-                onClick={() => switchRole('admin')}
-                className={`px-2 py-0.5 rounded-lg font-bold transition-all ${
-                  user?.role === 'admin' ? 'bg-amber-600 text-white shadow-xs' : 'hover:text-slate-900'
-                }`}
-              >
-                Admin
-              </button>
-            </div>
-          )}
-
           {isAuthenticated ? (
             <>
               {/* Quick Scan CTA */}
@@ -157,11 +137,7 @@ export const Navbar: React.FC = () => {
                   onClick={() => setProfileOpen(!profileOpen)}
                   className="flex items-center gap-2 p-1 rounded-full border border-slate-200 hover:border-teal-500 transition-colors focus:outline-none"
                 >
-                  <img
-                    src={user?.avatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=100&q=80'}
-                    alt={user?.fullName || 'User'}
-                    className="w-8 h-8 rounded-full object-cover"
-                  />
+                  {user && <UserAvatar user={user} className="w-8 h-8 rounded-full text-xs" />}
                   <ChevronDown className="w-3.5 h-3.5 text-slate-400 mr-1 hidden sm:block" />
                 </button>
 
@@ -207,10 +183,15 @@ export const Navbar: React.FC = () => {
                     <div className="border-t border-slate-100 my-1" />
 
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         setProfileOpen(false);
-                        logout();
-                        navigate('/');
+                        try {
+                          await logout();
+                        } catch {
+                          showToast('Signed out, but the server session could not be revoked.', 'warning');
+                        } finally {
+                          navigate('/login');
+                        }
                       }}
                       className="w-full flex items-center gap-2.5 px-4 py-2 text-xs text-red-600 hover:bg-red-50 transition-colors font-medium text-left"
                     >

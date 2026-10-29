@@ -17,7 +17,6 @@ export const initialMockUser: User = {
   fullName: 'Alex Morgan',
   email: 'alex.morgan@example.com',
   role: 'user',
-  avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
   createdAt: '2026-01-15T09:30:00Z',
   profile: {
     ageGroup: '25-34',

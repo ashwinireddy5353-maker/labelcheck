@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
+import { UserAvatar } from '../components/ui/UserAvatar';
 import { profileApi } from '../api/services';
 import { 
   User as UserIcon, 
@@ -15,14 +16,24 @@ import {
   Trash2, 
   Save, 
   Mail, 
-  ShieldCheck 
+  ShieldCheck,
+  Camera,
 } from 'lucide-react';
 
 export const ProfilePage: React.FC = () => {
-  const { user, updateProfile, logout } = useAuth();
+  const { user, updateProfile, updateAvatar, logout } = useAuth();
   const { showToast } = useToast();
 
   const [activeTab, setActiveTab] = useState<'profile' | 'allergies' | 'security'>('profile');
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+
+  useEffect(() => {
+    if (!avatarPreview) return;
+    return () => URL.revokeObjectURL(avatarPreview);
+  }, [avatarPreview]);
 
   // Personal Info Form State
   const [fullName, setFullName] = useState(user?.fullName || '');
@@ -47,6 +58,53 @@ export const ProfilePage: React.FC = () => {
   // Delete Modal
   const [isDeleteOpen, setIsDeleteOpen] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
+  const handleAvatarSelection = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      setAvatarError('Choose a PNG, JPEG, or WebP image.');
+      setAvatarFile(null);
+      setAvatarPreview(null);
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setAvatarError('Profile pictures must be 5 MB or smaller.');
+      setAvatarFile(null);
+      setAvatarPreview(null);
+      return;
+    }
+
+    setAvatarError(null);
+    setAvatarFile(file);
+    setAvatarPreview(URL.createObjectURL(file));
+  };
+
+  const handleSaveAvatar = async () => {
+    if (!avatarFile) return;
+    setIsUploadingAvatar(true);
+    try {
+      await updateAvatar(avatarFile);
+      setAvatarFile(null);
+      setAvatarPreview(null);
+      setAvatarError(null);
+      showToast('Profile picture updated.', 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update profile picture.';
+      setAvatarError(message);
+      showToast(message, 'error');
+    } finally {
+      setIsUploadingAvatar(false);
+    }
+  };
+
+  const handleCancelAvatar = () => {
+    setAvatarFile(null);
+    setAvatarPreview(null);
+    setAvatarError(null);
+  };
 
   const handleSaveProfile = async () => {
     try {
@@ -110,14 +168,55 @@ export const ProfilePage: React.FC = () => {
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-6">
         <div className="flex items-center gap-4">
-          <img
-            src={user?.avatarUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80'}
-            alt={user?.fullName || 'User Avatar'}
-            className="w-16 h-16 rounded-2xl object-cover border-2 border-teal-600 shadow-md"
-          />
+          <div className="relative">
+            {avatarPreview ? (
+              <img
+                src={avatarPreview}
+                alt="Profile picture preview"
+                className="w-16 h-16 rounded-2xl object-cover border-2 border-teal-600 shadow-md"
+              />
+            ) : user ? (
+              <UserAvatar user={user} className="w-16 h-16 rounded-2xl border-2 border-teal-600 shadow-md text-xl" />
+            ) : null}
+            <label
+              title="Choose a profile picture"
+              className="absolute -bottom-2 -right-2 p-2 rounded-full bg-white text-teal-800 border border-slate-200 shadow cursor-pointer hover:bg-teal-50"
+            >
+              <Camera className="w-4 h-4" />
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                className="sr-only"
+                onChange={handleAvatarSelection}
+                aria-label="Choose a profile picture"
+              />
+            </label>
+          </div>
           <div>
             <h1 className="text-2xl font-extrabold text-slate-900">{user?.fullName}</h1>
             <p className="text-xs text-slate-500">{user?.email} • Role: {user?.role.toUpperCase()}</p>
+            <p className="mt-1 text-[11px] text-slate-500">PNG, JPEG, or WebP · 5 MB maximum</p>
+            {avatarError && <p className="mt-1 text-xs text-red-600">{avatarError}</p>}
+            {avatarFile && (
+              <div className="mt-2 flex gap-2">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  isLoading={isUploadingAvatar}
+                  onClick={handleSaveAvatar}
+                >
+                  Save Picture
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isUploadingAvatar}
+                  onClick={handleCancelAvatar}
+                >
+                  Cancel
+                </Button>
+              </div>
+            )}
           </div>
         </div>
 

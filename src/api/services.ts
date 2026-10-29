@@ -1,4 +1,4 @@
-import { request, delay } from './apiClient';
+import { request, requestBlob, delay } from './apiClient';
 import {
   initialMockUser,
   initialMasterIngredients,
@@ -44,10 +44,35 @@ const STORAGE_KEYS = {
   DATASETS: 'labelcheck_datasets',
 };
 
+const USER_SCOPED_KEYS = new Set([
+  STORAGE_KEYS.USER,
+  STORAGE_KEYS.SCANS,
+  STORAGE_KEYS.REPORTS,
+  STORAGE_KEYS.SAVED,
+  STORAGE_KEYS.NOTIFS,
+]);
+
+const USER_DATA_KEYS = new Set([
+  STORAGE_KEYS.SCANS,
+  STORAGE_KEYS.REPORTS,
+  STORAGE_KEYS.SAVED,
+  STORAGE_KEYS.NOTIFS,
+]);
+
+function getStorageKey(key: string): string {
+  const userId = localStorage.getItem('labelcheck_user_id');
+  return userId && USER_SCOPED_KEYS.has(key) ? `${key}:${userId}` : key;
+}
+
 function getStorage<T>(key: string, fallback: T): T {
   try {
-    const data = localStorage.getItem(key);
-    return data ? JSON.parse(data) : fallback;
+    const userId = localStorage.getItem('labelcheck_user_id');
+    const data = localStorage.getItem(getStorageKey(key));
+    if (data) return JSON.parse(data);
+    if (userId && userId !== initialMockUser.id && USER_DATA_KEYS.has(key) && Array.isArray(fallback)) {
+      return [] as T;
+    }
+    return fallback;
   } catch {
     return fallback;
   }
@@ -55,7 +80,7 @@ function getStorage<T>(key: string, fallback: T): T {
 
 function setStorage<T>(key: string, value: T): void {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    localStorage.setItem(getStorageKey(key), JSON.stringify(value));
   } catch (e) {
     console.warn('LocalStorage error:', e);
   }
@@ -66,65 +91,29 @@ function setStorage<T>(key: string, value: T): void {
 // -------------------------------------------------------------
 export const authApi = {
   async login(email: string, password: string): Promise<{ token: string; user: User }> {
-    try {
-      return await request<{ token: string; user: User }>('/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
-      });
-    } catch {
-      await delay(600);
-      let user = getStorage<User>(STORAGE_KEYS.USER, initialMockUser);
-      // Support admin login toggle demo
-      if (email.includes('admin')) {
-        user = { ...user, role: 'admin', fullName: 'Dr. Elena Vance (Admin)' };
-      }
-      setStorage(STORAGE_KEYS.USER, user);
-      localStorage.setItem('labelcheck_token', 'mock_jwt_token_12345');
-      return { token: 'mock_jwt_token_12345', user };
-    }
+    return request<{ token: string; user: User }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
   },
 
   async register(data: { fullName: string; email: string; password: string }): Promise<{ token: string; user: User }> {
-    try {
-      return await request<{ token: string; user: User }>('/auth/register', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      });
-    } catch {
-      await delay(800);
-      const newUser: User = {
-        id: `user_${Date.now()}`,
-        fullName: data.fullName,
-        email: data.email,
-        role: 'user',
-        createdAt: new Date().toISOString(),
-        profile: {
-          allergies: [],
-          skinSensitivities: [],
-          avoidIngredients: [],
-          dietaryRestrictions: [],
-          fragranceSensitivity: false,
-          preferredCategories: [],
-          isOnboardingCompleted: false,
-        },
-      };
-      setStorage(STORAGE_KEYS.USER, newUser);
-      localStorage.setItem('labelcheck_token', `mock_jwt_token_${Date.now()}`);
-      return { token: `mock_jwt_token_${Date.now()}`, user: newUser };
-    }
+    return request<{ token: string; user: User }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
   },
 
   async getCurrentUser(): Promise<User> {
-    try {
-      return await request<User>('/auth/me');
-    } catch {
-      await delay(300);
-      return getStorage<User>(STORAGE_KEYS.USER, initialMockUser);
-    }
+    return request<User>('/auth/me');
   },
 
-  async logout(): Promise<void> {
-    localStorage.removeItem('labelcheck_token');
+  async logout(token?: string | null): Promise<void> {
+    if (!token) return;
+    await request<{ success: boolean }>('/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
   },
 };
 
@@ -132,6 +121,19 @@ export const authApi = {
 // PROFILE SERVICE
 // -------------------------------------------------------------
 export const profileApi = {
+  async updateAvatar(file: File): Promise<User> {
+    const formData = new FormData();
+    formData.append('avatar', file);
+    return request<User>('/profile/avatar', {
+      method: 'POST',
+      body: formData,
+    });
+  },
+
+  async getAvatar(avatarUrl: string, signal?: AbortSignal): Promise<Blob> {
+    return requestBlob(avatarUrl.replace(/^\/api/, ''), { signal });
+  },
+
   async updateProfile(profile: Partial<UserProfile>): Promise<User> {
     try {
       return await request<User>('/profile', {
@@ -173,14 +175,10 @@ export const scanApi = {
     try {
       const formData = new FormData();
       formData.append('image', file);
-      const token = localStorage.getItem('labelcheck_token');
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'}/scan/upload`, {
+      return await request<{ scanId: string; imageUrl: string }>('/scan/upload', {
         method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
         body: formData,
       });
-      if (!res.ok) throw new Error('Upload failed');
-      return await res.json();
     } catch {
       await delay(1000);
       const tempId = `scan_${Date.now()}`;
@@ -387,7 +385,8 @@ export const scanApi = {
       await delay(300);
       const reports = getStorage<SafetyReport[]>(STORAGE_KEYS.REPORTS, [sampleSafetyReport]);
       const found = reports.find(r => r.id === reportId || r.scanId === reportId);
-      return found || sampleSafetyReport;
+      if (!found) throw new Error('Report not found');
+      return found;
     }
   },
 };

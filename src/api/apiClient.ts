@@ -1,4 +1,4 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
 
 export class ApiError extends Error {
   status: number;
@@ -18,18 +18,20 @@ export async function request<T>(
 ): Promise<T> {
   const token = localStorage.getItem('labelcheck_token');
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options.headers as Record<string, string>),
-  };
+  const headers = new Headers(options.headers);
 
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  if (!(options.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
   }
 
   try {
     const response = await fetch(`${BASE_URL}${endpoint}`, {
       ...options,
+      cache: options.cache ?? 'no-store',
       headers,
     });
 
@@ -41,7 +43,7 @@ export async function request<T>(
         errorData = { message: response.statusText };
       }
       throw new ApiError(
-        errorData.message || `Request failed with status ${response.status}`,
+        errorData.message || errorData.error || `Request failed with status ${response.status}`,
         response.status,
         errorData
       );
@@ -53,6 +55,47 @@ export async function request<T>(
       throw err;
     }
     // Return standard network error
+    throw new ApiError(err.message || 'Network connection error', 0);
+  }
+}
+
+export async function requestBlob(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<Blob> {
+  const token = localStorage.getItem('labelcheck_token');
+  const headers = new Headers(options.headers);
+
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  try {
+    const response = await fetch(`${BASE_URL}${endpoint}`, {
+      ...options,
+      cache: options.cache ?? 'no-store',
+      headers,
+    });
+
+    if (!response.ok) {
+      let errorData: any = {};
+      try {
+        errorData = await response.json();
+      } catch {
+        errorData = { message: response.statusText };
+      }
+      throw new ApiError(
+        errorData.message || errorData.error || `Request failed with status ${response.status}`,
+        response.status,
+        errorData
+      );
+    }
+
+    return await response.blob();
+  } catch (err: any) {
+    if (err instanceof ApiError) {
+      throw err;
+    }
     throw new ApiError(err.message || 'Network connection error', 0);
   }
 }

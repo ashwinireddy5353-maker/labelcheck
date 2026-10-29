@@ -6,6 +6,7 @@ import { Scan, SafetyReport } from '../types';
 import { Button } from '../components/ui/Button';
 import { ProductCard } from '../components/report/ProductCard';
 import { IngredientSandbox } from '../components/dashboard/IngredientSandbox';
+import { UserAvatar } from '../components/ui/UserAvatar';
 import { 
   Sparkles, 
   ScanText, 
@@ -61,15 +62,20 @@ export const DashboardPage: React.FC = () => {
   const savedCount = savedProducts.length;
 
   // Recharts Scan History Analytics Data
-  const chartData = [
-    { day: 'Mon', scans: 1, hazards: 0, avgScore: 88 },
-    { day: 'Tue', scans: 3, hazards: 1, avgScore: 72 },
-    { day: 'Wed', scans: 2, hazards: 1, avgScore: 65 },
-    { day: 'Thu', scans: 4, hazards: 2, avgScore: 54 },
-    { day: 'Fri', scans: 2, hazards: 0, avgScore: 92 },
-    { day: 'Sat', scans: 5, hazards: 2, avgScore: 60 },
-    { day: 'Sun', scans: 3, hazards: 1, avgScore: 78 },
-  ];
+  const chartData = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() - (6 - index));
+    const dayScans = scans.filter((scan) => {
+      const scanDate = new Date(scan.scanDate);
+      return scanDate.toDateString() === date.toDateString();
+    });
+
+    return {
+      day: date.toLocaleDateString(undefined, { weekday: 'short' }),
+      scans: dayScans.length,
+      hazards: dayScans.reduce((total, scan) => total + scan.hazardsCount, 0),
+    };
+  });
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
@@ -81,9 +87,12 @@ export const DashboardPage: React.FC = () => {
               <Sparkles className="w-3.5 h-3.5" />
               AI Allergen & Hazard Workspace
             </span>
-            <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
-              Welcome back, {user?.fullName || 'User'}! 👋
-            </h1>
+            <div className="flex items-center gap-3">
+              {user && <UserAvatar user={user} className="w-12 h-12 rounded-full border-2 border-white/70 text-sm" />}
+              <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
+                Welcome back, {user?.fullName || 'User'}! 👋
+              </h1>
+            </div>
             <p className="text-xs sm:text-sm text-teal-100 leading-relaxed">
               Ready to check your next product label? Scan any bottle, tube, or package to cross-examine ingredients against your profile allergies.
             </p>

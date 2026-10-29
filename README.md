@@ -12,7 +12,7 @@ LabelCheck is a modern, responsive React frontend application for a college mino
 - **Public Landing Page (`/`)**: Hero section, OCR visual demo, 4-step workflow, feature highlights, and medical risk disclaimers.
 - **Authentication (`/login`, `/register`, `/forgot-password`)**: Form validations using React Hook Form + Zod, password strength meter, remember me, and Google OAuth UI mockup.
 - **Onboarding Workflow (`/onboarding`)**: Interactive step-by-step wizard collecting allergies, skin type (sensitive, dry, oily, etc.), skin sensitivities, ingredients to avoid, and product categories.
-- **Personal Profile (`/profile`)**: Manage personal details, update allergy watchlists, change password, and delete account.
+- **Personal Profile (`/profile`)**: Manage personal details, upload an account-specific profile picture, update allergy watchlists, change password, and delete account. Users without an uploaded picture see their initials.
 - **Main Dashboard (`/dashboard`)**: Summary metric cards, recent scans list with risk badges, Recharts scan trend analytics, quick scan shortcuts, and safer alternatives preview.
 - **Product Scanning Workspace (`/scan`)**: Multi-method scanner supporting:
   - **Upload Image**: Drag & drop file dropzone for JPG, PNG, JPEG, and WebP (up to 10MB) with format checks and file size validation.
@@ -53,7 +53,7 @@ LabelCheck is a modern, responsive React frontend application for a college mino
 - **Server State & Caching**: TanStack Query (React Query v5)
 - **Data Visualization**: Recharts
 - **Form Management**: React Hook Form + Zod validation
-- **HTTP Client**: Centralized API Client layer with `localStorage` mock fallback persistence
+- **HTTP Client**: Centralized API client with bearer sessions and account-scoped local fallback persistence
 
 ---
 
@@ -74,7 +74,7 @@ minor project/
 │   │   ├── scan/             # FileUpload, CameraCapture, ScanProgress
 │   │   └── ui/               # Logo, Button, Input, SafetyScoreCircle, RiskBadge, IngredientChip, Modal, Drawer, Toast
 │   ├── context/
-│   │   ├── AuthContext.tsx   # User authentication & Dev role switching state
+│   │   ├── AuthContext.tsx   # Backend-verified user authentication state
 │   │   └── ToastContext.tsx  # Global toast notifications
 │   ├── pages/
 │   │   ├── admin/            # Admin Dashboard, Users, Ingredients, Allergens, Hazards, Datasets, Audit Logs
@@ -112,51 +112,30 @@ Clone or navigate to the project root directory and install dependencies:
 npm install
 ```
 
-### 2. Development Server
-Start the Vite local development server:
+### 2. Start the Backend
+Run the Flask API from the project root:
 
 ```bash
-npm run dev
+python backend\app.py
 ```
 
-Open `http://localhost:3000` in your browser.
+The backend listens on `http://localhost:5000`. Authentication accounts and sessions are stored in `backend\labelcheck_auth.sqlite3` (or the path set with `LABELCHECK_AUTH_DB`). Profile pictures are stored under `backend\uploads\avatars` (or `LABELCHECK_AVATAR_DIR`) and linked to the authenticated user in SQLite. The database is created on first start; no demo account is pre-registered.
 
-### 3. Production Build & Verification
+### 3. Development Frontend
+In a second terminal, start Vite:
+
+```bash
+npm.cmd run dev
+```
+
+Open the URL printed by Vite (by default, `http://localhost:5173`). The frontend API base defaults to `http://localhost:5000/api`; set `VITE_API_BASE_URL` only when using a different backend URL.
+
+### 4. Production Build & Verification
 Compile TypeScript and bundle for production:
 
 ```bash
-npm run build
+npm.cmd run build
 ```
-
----
-
-## 🔌 Python Backend Integration Guide
-
-LabelCheck comes pre-configured with a centralized API layer in `src/api/apiClient.ts` and `src/api/services.ts`.
-
-To connect this React frontend to a live Python backend (FastAPI / Flask):
-
-1. Create a `.env` file in the project root:
-   ```env
-   VITE_API_BASE_URL=http://localhost:8000/api
-   ```
-2. Ensure your Python backend implements the expected REST endpoints detailed in `src/api/services.ts`:
-   - `POST /api/auth/login`
-   - `POST /api/auth/register`
-   - `GET /api/auth/me`
-   - `POST /api/scan/upload`
-   - `POST /api/scan/:id/ocr`
-   - `POST /api/scan/:id/analyze`
-   - `GET /api/reports/:id`
-   - `GET /api/admin/stats`
-
-*Note: In the absence of an active backend server, the application operates out-of-the-box using local storage persistence!*
-
----
-
-## 💡 Developer Persona Switcher
-
-During development, you can test both **User** and **Admin** roles without re-authenticating. Click the **Role: User / Admin** toggle pill located in the navbar header to instantly preview role-protected pages.
 
 ---
 

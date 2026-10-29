@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { assistantApi } from '../api/assistantApi';
 import { Sparkles, MessageSquare, X, Send, Bot, User as UserIcon, ShieldAlert } from 'lucide-react';
 import { Button } from './Button';
 
@@ -18,7 +19,7 @@ export const AiAssistantWidget: React.FC = () => {
       text: 'Hello! I am LabelCheck Assistant. Ask me anything about ingredient safety, EWG scores, or skin sensitivity guidance.',
     },
   ]);
-
+const [isLoading, setIsLoading] = useState(false);
   const handleSend = (userQuery?: string) => {
     const textToSend = userQuery || input;
     if (!textToSend.trim()) return;
