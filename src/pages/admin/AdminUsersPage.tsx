@@ -22,10 +22,15 @@ export const AdminUsersPage: React.FC = () => {
     loadUsers();
   }, []);
 
-  const handleRoleToggle = (userId: string, currentRole: UserRole) => {
+  const handleRoleToggle = async (userId: string, currentRole: UserRole) => {
     const newRole: UserRole = currentRole === 'admin' ? 'user' : 'admin';
-    setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u)));
-    showToast(`User role updated to ${newRole.toUpperCase()}`, 'success');
+    try {
+      await adminApi.updateUserRole(userId, newRole);
+      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role: newRole } : u)));
+      showToast(`User role updated to ${newRole.toUpperCase()}`, 'success');
+    } catch {
+      showToast('Failed to update user role.', 'error');
+    }
   };
 
   const filteredUsers = users.filter(

@@ -36,7 +36,13 @@ api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key) if api_key else None
 
 app = Flask(__name__)
-CORS(app)
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    supports_credentials=True,
+    allow_headers=["*"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+)
 
 AUTH_DATABASE_PATH = Path(
     os.getenv("LABELCHECK_AUTH_DB", BASE_DIR / "labelcheck_auth.sqlite3")
@@ -290,12 +296,21 @@ def require_auth(view):
                 (token_hash,),
             ).fetchone()
 
-            if not row or datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
-                if row:
-                    connection.execute(
-                        "DELETE FROM auth_sessions WHERE token_hash = ?",
-                        (token_hash,),
-                    )
+            if not row:
+                return jsonify({"message": "Session is invalid or expired"}), 401
+
+            try:
+                expires_at = datetime.fromisoformat(row["expires_at"])
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+            except Exception:
+                expires_at = datetime.min.replace(tzinfo=timezone.utc)
+
+            if expires_at <= datetime.now(timezone.utc):
+                connection.execute(
+                    "DELETE FROM auth_sessions WHERE token_hash = ?",
+                    (token_hash,),
+                )
                 return jsonify({"message": "Session is invalid or expired"}), 401
 
             g.auth_user = serialize_user(row)
@@ -318,47 +333,49 @@ def prevent_auth_response_caching(response):
 
 
 # ==========================================
-# 2. LOAD ML MODEL
+# 2. LOAD ML MODEL & DATASET (LAZY)
 # ==========================================
 
 MODEL_PATH = PROJECT_DIR / "model" / "labelcheck_name_model.pkl"
-
-if not MODEL_PATH.exists():
-    raise FileNotFoundError(f"ML model not found: {MODEL_PATH}")
-
-model = joblib.load(MODEL_PATH)
-
-
-# ==========================================
-# 3. LOAD INGREDIENT DATASET
-# ==========================================
-
 DATASET_PATH = PROJECT_DIR / "dataset" / "ingredient-flags.csv.xlsx"
 
-if not DATASET_PATH.exists():
-    raise FileNotFoundError(f"Ingredient dataset not found: {DATASET_PATH}")
+_model = None
+_df = None
 
-df = pd.read_excel(DATASET_PATH)
 
-required_columns = [
-    "display_name",
-    "fragrance",
-    "eu_allergen",
-    "pregnancy_caution",
-]
+def get_model():
+    global _model
+    if _model is None:
+        if not MODEL_PATH.exists():
+            raise FileNotFoundError(f"ML model not found: {MODEL_PATH}")
+        _model = joblib.load(MODEL_PATH)
+    return _model
 
-missing_columns = [column for column in required_columns if column not in df.columns]
 
-if missing_columns:
-    raise ValueError(f"Dataset is missing columns: {missing_columns}")
-
-df["display_name"] = (
-    df["display_name"]
-    .fillna("")
-    .astype(str)
-    .str.strip()
-    .str.lower()
-)
+def get_dataset():
+    global _df
+    if _df is None:
+        if not DATASET_PATH.exists():
+            raise FileNotFoundError(f"Ingredient dataset not found: {DATASET_PATH}")
+        loaded_df = pd.read_excel(DATASET_PATH)
+        required_columns = [
+            "display_name",
+            "fragrance",
+            "eu_allergen",
+            "pregnancy_caution",
+        ]
+        missing_columns = [c for c in required_columns if c not in loaded_df.columns]
+        if missing_columns:
+            raise ValueError(f"Dataset is missing columns: {missing_columns}")
+        loaded_df["display_name"] = (
+            loaded_df["display_name"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+        )
+        _df = loaded_df
+    return _df
 
 
 # ==========================================
@@ -386,6 +403,8 @@ def dataset_flag(value):
 
 def analyze_ingredients(ingredients):
     results = []
+    model = get_model()
+    df = get_dataset()
 
     for ingredient in ingredients:
         if not isinstance(ingredient, str):
@@ -436,18 +455,21 @@ def analyze_ingredients(ingredients):
 @app.route("/api/auth/register", methods=["POST"])
 def register():
     data = request.get_json(silent=True) or {}
-    full_name = data.get("fullName")
+    full_name = data.get("fullName") or data.get("name")
     email = data.get("email")
     password = data.get("password")
 
     if not isinstance(full_name, str) or len(full_name.strip()) < 2:
         return jsonify({"message": "Full name must be at least 2 characters"}), 400
     if not isinstance(email, str) or not re.fullmatch(
-        r"[^@\s]+@[^@\s]+\.[^@\s]+", email.strip()
+        r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", email.strip()
     ):
         return jsonify({"message": "Please enter a valid email address"}), 400
     if not isinstance(password, str) or len(password) < 8:
         return jsonify({"message": "Password must be at least 8 characters"}), 400
+
+    clean_name = full_name.strip()
+    clean_email = email.strip().lower()
 
     profile = {
         "allergies": [],
@@ -463,16 +485,27 @@ def register():
 
     try:
         with get_auth_connection() as connection:
+            existing = connection.execute(
+                "SELECT id FROM users WHERE email = ? COLLATE NOCASE",
+                (clean_email,),
+            ).fetchone()
+            if existing:
+                return jsonify({"message": "An account with this email address already exists. Please sign in instead."}), 409
+
+            user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            role = "admin" if user_count == 0 else "user"
+
             connection.execute(
                 """
                 INSERT INTO users (id, full_name, email, password_hash, role, created_at, profile_json)
-                VALUES (?, ?, ?, ?, 'user', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
-                    full_name.strip(),
-                    email.strip().lower(),
+                    clean_name,
+                    clean_email,
                     generate_password_hash(password),
+                    role,
                     created_at,
                     json.dumps(profile),
                 ),
@@ -482,7 +515,7 @@ def register():
             ).fetchone()
             token = create_auth_session(connection, user_id)
     except sqlite3.IntegrityError:
-        return jsonify({"message": "An account with this email already exists"}), 409
+        return jsonify({"message": "An account with this email address already exists. Please sign in instead."}), 409
 
     return jsonify({"token": token, "user": serialize_user(user)}), 201
 
@@ -493,13 +526,15 @@ def login():
     email = data.get("email")
     password = data.get("password")
 
-    if not isinstance(email, str) or not isinstance(password, str):
+    if not isinstance(email, str) or not isinstance(password, str) or not email.strip() or not password:
         return jsonify({"message": "Email and password are required"}), 400
+
+    clean_email = email.strip().lower()
 
     with get_auth_connection() as connection:
         user = connection.execute(
             "SELECT * FROM users WHERE email = ? COLLATE NOCASE",
-            (email.strip(),),
+            (clean_email,),
         ).fetchone()
 
         if not user or not check_password_hash(user["password_hash"], password):
@@ -526,6 +561,83 @@ def logout():
                 "DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,)
             )
     return jsonify({"success": True})
+
+
+@app.route("/api/profile/password", methods=["PUT"])
+@require_auth
+def change_password():
+    data = request.get_json(silent=True) or {}
+    old_password = data.get("oldPassword")
+    new_password = data.get("newPassword")
+
+    if not isinstance(old_password, str) or not isinstance(new_password, str) or not old_password or not new_password:
+        return jsonify({"message": "Old and new passwords are required"}), 400
+
+    if len(new_password) < 8:
+        return jsonify({"message": "New password must be at least 8 characters"}), 400
+
+    with get_auth_connection() as connection:
+        user = connection.execute(
+            "SELECT * FROM users WHERE id = ?", (g.auth_user["id"],)
+        ).fetchone()
+
+        if not user or not check_password_hash(user["password_hash"], old_password):
+            return jsonify({"message": "Current password is incorrect"}), 400
+
+        connection.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (generate_password_hash(new_password), g.auth_user["id"]),
+        )
+
+    return jsonify({"success": True, "message": "Password updated successfully"})
+
+
+@app.route("/api/profile", methods=["DELETE"])
+@require_auth
+def delete_account():
+    user_id = g.auth_user["id"]
+    with get_auth_connection() as connection:
+        user = connection.execute(
+            "SELECT avatar_filename FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+        if user and user["avatar_filename"]:
+            avatar_path = PROFILE_AVATAR_DIRECTORY / user["avatar_filename"]
+            if avatar_path.is_file():
+                try:
+                    avatar_path.unlink()
+                except OSError:
+                    pass
+
+        connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    return jsonify({"success": True, "message": "Account deleted successfully"})
+
+
+@app.route("/api/admin/users", methods=["GET"])
+@require_auth
+def admin_get_users():
+    if g.auth_user["role"] != "admin":
+        return jsonify({"message": "Admin privileges required"}), 403
+    with get_auth_connection() as connection:
+        rows = connection.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
+        return jsonify([serialize_user(row) for row in rows])
+
+
+@app.route("/api/admin/users/<user_id>/role", methods=["PUT"])
+@require_auth
+def admin_update_user_role(user_id):
+    if g.auth_user["role"] != "admin":
+        return jsonify({"message": "Admin privileges required"}), 403
+    data = request.get_json(silent=True) or {}
+    new_role = data.get("role")
+    if new_role not in ("user", "admin"):
+        return jsonify({"message": "Role must be 'user' or 'admin'"}), 400
+    with get_auth_connection() as connection:
+        connection.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, user_id))
+        user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not user:
+            return jsonify({"message": "User not found"}), 404
+        return jsonify(serialize_user(user))
 
 
 @app.route("/api/profile", methods=["PUT"])
@@ -734,6 +846,7 @@ def assistant_chat():
     # Look for an exact ingredient name in the user's message.
     # This initial implementation supports exact ingredient-name messages.
     query = clean_ingredient(message)
+    df = get_dataset()
     match = df[df["display_name"] == query]
 
     ingredient_context = []
@@ -750,6 +863,7 @@ def assistant_chat():
         })
 
         try:
+            model = get_model()
             prediction = model.predict([query])[0]
             probabilities = model.predict_proba([query])[0]
 
@@ -842,4 +956,5 @@ def assistant_chat():
 # ==========================================
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="127.0.0.1", port=port, debug=False)

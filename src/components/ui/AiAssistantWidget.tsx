@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { assistantApi } from '../api/assistantApi';
 import { Sparkles, MessageSquare, X, Send, Bot, User as UserIcon, ShieldAlert } from 'lucide-react';
 import { Button } from './Button';
 

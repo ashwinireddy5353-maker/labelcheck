@@ -14,6 +14,7 @@ import {
 } from './mockData';
 import {
   User,
+  UserRole,
   UserProfile,
   Scan,
   OCRResult,
@@ -93,14 +94,18 @@ export const authApi = {
   async login(email: string, password: string): Promise<{ token: string; user: User }> {
     return request<{ token: string; user: User }>('/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
     });
   },
 
   async register(data: { fullName: string; email: string; password: string }): Promise<{ token: string; user: User }> {
     return request<{ token: string; user: User }>('/auth/register', {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        fullName: data.fullName.trim(),
+        email: data.email.trim().toLowerCase(),
+        password: data.password,
+      }),
     });
   },
 
@@ -110,10 +115,14 @@ export const authApi = {
 
   async logout(token?: string | null): Promise<void> {
     if (!token) return;
-    await request<{ success: boolean }>('/auth/logout', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    try {
+      await request<{ success: boolean }>('/auth/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // Ignore network errors during logout
+    }
   },
 };
 
@@ -155,15 +164,19 @@ export const profileApi = {
     }
   },
 
-  async updatePassword(_data: { oldPassword: string; newPassword: string }): Promise<{ success: boolean }> {
-    await delay(500);
-    return { success: true };
+  async updatePassword(data: { oldPassword: string; newPassword: string }): Promise<{ success: boolean }> {
+    return request<{ success: boolean }>('/profile/password', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
   },
 
   async deleteAccount(): Promise<{ success: boolean }> {
-    await delay(600);
+    const res = await request<{ success: boolean }>('/profile', {
+      method: 'DELETE',
+    });
     localStorage.clear();
-    return { success: true };
+    return res;
   },
 };
 
@@ -514,6 +527,19 @@ export const adminApi = {
           profile: { ...initialMockUser.profile, isOnboardingCompleted: true },
         },
       ];
+    }
+  },
+
+  async updateUserRole(userId: string, role: UserRole): Promise<User> {
+    try {
+      return await request<User>(`/admin/users/${userId}/role`, {
+        method: 'PUT',
+        body: JSON.stringify({ role }),
+      });
+    } catch {
+      await delay(300);
+      const mockUser = getStorage<User>(STORAGE_KEYS.USER, initialMockUser);
+      return { ...mockUser, id: userId, role };
     }
   },
 

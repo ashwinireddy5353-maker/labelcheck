@@ -12,8 +12,8 @@ import { Eye, EyeOff, UserPlus, Lock, Mail, User as UserIcon, Check } from 'luci
 
 const registerSchema = z
   .object({
-    fullName: z.string().min(2, 'Full name must be at least 2 characters'),
-    email: z.string().email('Please enter a valid email address'),
+    fullName: z.string().trim().min(2, 'Full name must be at least 2 characters'),
+    email: z.string().trim().email('Please enter a valid email address'),
     password: z.string().min(8, 'Password must be at least 8 characters'),
     confirmPassword: z.string(),
     agreeToTerms: z.boolean().refine((val) => val === true, 'You must agree to the Terms of Service'),
@@ -62,8 +62,8 @@ export const RegisterPage: React.FC = () => {
     setIsLoading(true);
     try {
       await registerAuth({
-        fullName: data.fullName,
-        email: data.email,
+        fullName: data.fullName.trim(),
+        email: data.email.trim().toLowerCase(),
         password: data.password,
       });
       showToast('Account created successfully!', 'success');

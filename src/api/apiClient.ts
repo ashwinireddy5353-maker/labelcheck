@@ -54,8 +54,13 @@ export async function request<T>(
     if (err instanceof ApiError) {
       throw err;
     }
-    // Return standard network error
-    throw new ApiError(err.message || 'Network connection error', 0);
+    if (err?.message === 'Failed to fetch' || err?.name === 'TypeError') {
+      throw new ApiError(
+        'Unable to connect to the authentication server. Please ensure the backend is running.',
+        0
+      );
+    }
+    throw new ApiError(err?.message || 'Network connection error', 0);
   }
 }
 

@@ -11,8 +11,8 @@ import { Button } from '../../components/ui/Button';
 import { Eye, EyeOff, LogIn, Lock, Mail } from 'lucide-react';
 
 const loginSchema = z.object({
-  email: z.string().email('Please enter a valid email address'),
-  password: z.string().min(6, 'Password must be at least 6 characters'),
+  email: z.string().trim().email('Please enter a valid email address'),
+  password: z.string().min(1, 'Please enter your password'),
   rememberMe: z.boolean().optional(),
 });
 
@@ -44,7 +44,7 @@ export const LoginPage: React.FC = () => {
   const onSubmit = async (data: LoginFormData) => {
     setIsLoading(true);
     try {
-      await login(data.email, data.password);
+      await login(data.email.trim().toLowerCase(), data.password);
       showToast('Successfully logged in!', 'success');
       navigate(from, { replace: true });
     } catch (err: any) {
