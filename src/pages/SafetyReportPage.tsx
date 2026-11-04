@@ -10,6 +10,7 @@ import { IngredientDetailModal } from '../components/report/IngredientDetailModa
 import { ProductCard } from '../components/report/ProductCard';
 import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';
+import { ErrorState } from '../components/ui/ErrorState';
 import { 
   Bookmark, 
   Download, 
@@ -32,6 +33,8 @@ export const SafetyReportPage: React.FC = () => {
   const { showToast } = useToast();
 
   const [report, setReport] = useState<SafetyReport | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedIngredient, setSelectedIngredient] = useState<IngredientAnalysis | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
@@ -42,38 +45,92 @@ export const SafetyReportPage: React.FC = () => {
   const [simulatedExcludedIds, setSimulatedExcludedIds] = useState<string[]>([]);
   const [isSimulatorOpen, setIsSimulatorOpen] = useState(false);
 
-  useEffect(() => {
-    async function loadReport() {
-      if (!scanId) return;
-      try {
-        const res = await scanApi.getReport(scanId);
-        setReport(res);
-        setIsSaved(!!res.isFavorite);
-
-        // Confetti celebration if safe product score >= 80
-        if (res.score >= 80) {
-          confetti({
-            particleCount: 70,
-            spread: 60,
-            origin: { y: 0.6 },
-            colors: ['#0f766e', '#059669', '#34d399'],
-          });
-        }
-      } catch {
-        showToast('Could not load safety report.', 'error');
-      }
+  const loadReport = async () => {
+    if (!scanId) {
+      setIsLoading(false);
+      setLoadError('No scan ID provided in URL.');
+      return;
     }
+
+    setIsLoading(true);
+    setLoadError(null);
+
+    try {
+      const res = await scanApi.getReport(scanId);
+      setReport(res);
+      setIsSaved(!!res.isFavorite);
+
+      // Confetti celebration if safe product score >= 80
+      if (res.score >= 80) {
+        confetti({
+          particleCount: 70,
+          spread: 60,
+          origin: { y: 0.6 },
+          colors: ['#0f766e', '#059669', '#34d399'],
+        });
+      }
+    } catch (err: any) {
+      console.error('Error loading report:', err);
+      setLoadError(err?.message || 'Could not load safety report.');
+      showToast('Could not load safety report.', 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
     loadReport();
   }, [scanId]);
 
-  if (!report) {
+  if (isLoading) {
     return (
-      <div className="min-h-[70vh] flex items-center justify-center">
-        <div className="animate-pulse text-sm font-semibold text-slate-500">
-          Fetching AI Safety Analysis Report...
+      <div className="min-h-[70vh] flex flex-col items-center justify-center p-6 space-y-4">
+        <div className="relative">
+          <div className="w-16 h-16 rounded-full border-4 border-teal-100 border-t-teal-700 animate-spin" />
+          <Sparkles className="w-6 h-6 text-teal-700 absolute inset-0 m-auto" />
+        </div>
+        <div className="text-center space-y-1">
+          <h3 className="text-base font-bold text-slate-800">Calculating AI Safety Analysis...</h3>
+          <p className="text-xs text-slate-500">Cross-referencing formulation against chemical hazards and sensitivity registries</p>
         </div>
       </div>
     );
+  }
+
+  if (loadError && !report) {
+    const cleanScanId = scanId?.replace(/^rep_/, '') || '';
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-16 space-y-6">
+        <ErrorState
+          title="Safety Report Not Available"
+          message={`Unable to retrieve analysis for session "${scanId}". You can retry loading, review the detected ingredients, or perform a fresh label scan.`}
+          onRetry={loadReport}
+        />
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          {cleanScanId && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => navigate(`/scan/review/${cleanScanId}`)}
+            >
+              Back to OCR Review
+            </Button>
+          )}
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => navigate('/scan')}
+            leftIcon={<RotateCcw className="w-4 h-4" />}
+          >
+            Scan Another Label
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!report) {
+    return null;
   }
 
   const handleToggleFavorite = async () => {
@@ -109,14 +166,19 @@ export const SafetyReportPage: React.FC = () => {
     setIsReportOcrModalOpen(false);
   };
 
-  // What-if Simulator recalculated score
+  // What-if Simulator recalculated score considering all ingredients and personal allergens
   const activeSimulatedIngredients = report.ingredients.filter((i) => !simulatedExcludedIds.includes(i.id));
+  const simulatedPersonal = activeSimulatedIngredients.filter((i) => (i as any).isPersonalAllergen || i.personalizedMatch).length;
   const simulatedHazards = activeSimulatedIngredients.filter((i) => i.isHazardous).length;
   const simulatedAllergens = activeSimulatedIngredients.filter((i) => i.isAllergen).length;
   const simulatedIrritants = activeSimulatedIngredients.filter((i) => i.isIrritant).length;
+  const simulatedClean = activeSimulatedIngredients.filter((i) => (i as any).isClean || (i.riskLevel === 'low' && !i.personalizedMatch)).length;
 
-  let recalculatedScore = 100 - (simulatedHazards * 25) - (simulatedAllergens * 15) - (simulatedIrritants * 10);
-  recalculatedScore = Math.max(15, Math.min(99, recalculatedScore));
+  let recalculatedScore = 100 - (simulatedPersonal * 35) - (simulatedHazards * 22) - (simulatedAllergens * 12) - (simulatedIrritants * 8) + Math.min(15, simulatedClean * 2);
+  if (simulatedPersonal >= 2) recalculatedScore = Math.min(25, recalculatedScore);
+  else if (simulatedPersonal === 1) recalculatedScore = Math.min(45, recalculatedScore);
+  else if (simulatedHazards >= 1) recalculatedScore = Math.min(68, recalculatedScore);
+  recalculatedScore = Math.max(10, Math.min(100, Math.round(recalculatedScore)));
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-10">
@@ -124,8 +186,16 @@ export const SafetyReportPage: React.FC = () => {
       <div className="bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden p-6 md:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
         <div className="flex items-center gap-5">
           <img
-            src={report.imageUrl || 'https://images.unsplash.com/photo-1526947425960-945c6e72858f?auto=format&fit=crop&w=400&q=80'}
+            src={
+              report.imageUrl?.startsWith('/api')
+                ? `http://localhost:5000${report.imageUrl}`
+                : report.imageUrl || 'https://images.unsplash.com/photo-1526947425960-945c6e72858f?auto=format&fit=crop&w=400&q=80'
+            }
             alt={report.productName}
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).src =
+                'https://images.unsplash.com/photo-1526947425960-945c6e72858f?auto=format&fit=crop&w=400&q=80';
+            }}
             className="w-20 h-20 md:w-24 md:h-24 rounded-2xl object-cover border-2 border-teal-600 shadow-md"
           />
           <div className="space-y-1">

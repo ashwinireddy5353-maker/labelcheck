@@ -40,6 +40,15 @@ export interface OCRResult {
   overallConfidence: number;
   extractedItems: OCRItem[];
   imageUrl?: string;
+  imageQuality?: {
+    brightness: number;
+    sharpnessScore: number;
+    isBlurry: boolean;
+    isDark: boolean;
+    isOverexposed: boolean;
+    feedbackMessage: string;
+    isAcceptable: boolean;
+  };
 }
 
 export interface IngredientAnalysis {

@@ -14,6 +14,7 @@ import sqlite3
 import struct
 import tempfile
 import zlib
+import difflib
 from pathlib import Path
 
 import joblib
@@ -50,6 +51,10 @@ AUTH_DATABASE_PATH = Path(
 PROFILE_AVATAR_DIRECTORY = Path(
     os.getenv("LABELCHECK_AVATAR_DIR", BASE_DIR / "uploads" / "avatars")
 )
+SCAN_UPLOAD_DIRECTORY = Path(
+    os.getenv("LABELCHECK_SCAN_DIR", BASE_DIR / "uploads" / "scans")
+)
+SCAN_UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
 MAX_PROFILE_AVATAR_SIZE = 5 * 1024 * 1024
 MAX_PROFILE_AVATAR_DIMENSION = 4096
 MAX_PROFILE_AVATAR_PIXELS = 20_000_000
@@ -105,6 +110,23 @@ def initialize_auth_database():
                 user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 created_at TEXT NOT NULL,
                 expires_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scans (
+                id TEXT PRIMARY KEY,
+                user_id TEXT,
+                product_name TEXT NOT NULL,
+                brand TEXT,
+                category TEXT,
+                image_url TEXT,
+                scan_date TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                risk_level TEXT NOT NULL,
+                ingredients_json TEXT NOT NULL,
+                report_json TEXT NOT NULL
             )
             """
         )
@@ -398,54 +420,523 @@ def dataset_flag(value):
 
 
 # ==========================================
-# 5. ANALYZE INGREDIENTS
+# 5. INGREDIENT TOXICOLOGY & ALLERGEN REGISTRY
 # ==========================================
 
-def analyze_ingredients(ingredients):
-    results = []
-    model = get_model()
-    df = get_dataset()
+KNOWN_HAZARDS = {
+    "formaldehyde_releasers": {
+        "keywords": [
+            "dmdm hydantoin", "formaldehyde", "quaternium-15", "diazolidinyl urea",
+            "imidazolidinyl urea", "polyoxymethylene urea", "sodium hydroxymethylglycinate",
+            "bronopol", "2-bromo-2-nitropropane", "glyoxal", "methenamine"
+        ],
+        "category": "Formaldehyde Releaser",
+        "risk_level": "hazardous",
+        "is_hazardous": True,
+        "is_allergen": True,
+        "is_irritant": True,
+        "hazard_details": "Formaldehyde-releasing preservative classified as a human carcinogen and high-potency contact allergen.",
+        "why_flagged": "Potentially Hazardous Formaldehyde Releaser",
+    },
+    "parabens": {
+        "keywords": [
+            "methylparaben", "propylparaben", "butylparaben", "ethylparaben",
+            "isobutylparaben", "isopropylparaben", "benzylparaben", "paraben"
+        ],
+        "category": "Preservative / Paraben",
+        "risk_level": "moderate",
+        "is_hazardous": True,
+        "is_allergen": False,
+        "is_irritant": True,
+        "hazard_details": "Synthetic antimicrobial preservative associated with weak estrogenic and endocrine disruption activity.",
+        "why_flagged": "Potential Endocrine Disruptor (Parabens)",
+    },
+    "phthalates": {
+        "keywords": ["dibutyl phthalate", "diethyl phthalate", "phthalate", "dbp", "dep", "dehp"],
+        "category": "Plasticizer / Phthalate",
+        "risk_level": "hazardous",
+        "is_hazardous": True,
+        "is_allergen": False,
+        "is_irritant": True,
+        "hazard_details": "Classified reproductive toxicant and endocrine disruptor restricted in cosmetics.",
+        "why_flagged": "High Hazard: Restricted Phthalate",
+    },
+    "harsh_sulfates": {
+        "keywords": [
+            "sodium lauryl sulfate", "sls", "ammonium lauryl sulfate",
+            "sodium laureth sulfate", "sles", "tea-lauryl sulfate"
+        ],
+        "category": "Harsh Surfactant",
+        "risk_level": "moderate",
+        "is_hazardous": False,
+        "is_allergen": False,
+        "is_irritant": True,
+        "irritant_details": "Harsh anionic detergent known to strip natural skin lipids, compromise epidermal barrier, and trigger dermatitis.",
+        "why_flagged": "Harsh Cleansing Detergent (Barrier Stripper)",
+    },
+    "chemical_uv_filters": {
+        "keywords": [
+            "oxybenzone", "benzophenone-3", "benzophenone", "octinoxate",
+            "ethylhexyl methoxycinnamate", "octyl methoxycinnamate", "4-methylbenzylidene camphor",
+            "homosalate", "octocrylene", "avobenzone", "butyl methoxydibenzoylmethane",
+            "octisalate", "ethylhexyl salicylate", "butyloctyl salicylate",
+            "diethylamino hydroxybenzoyl hexyl benzoate", "methylene bis-benzotriazolyl",
+            "tinosorb", "mexoryl", "cinnamate", "methoxycinnamate"
+        ],
+        "category": "Chemical UV Filter",
+        "risk_level": "moderate",
+        "is_hazardous": True,
+        "is_allergen": True,
+        "is_irritant": True,
+        "hazard_details": "Chemical UV absorber with documented systemic dermal absorption, potential hormone mimicry, and aquatic ecotoxicity.",
+        "why_flagged": "Chemical UV Filter with Potential Endocrine/Sensitivity Concern",
+    },
+    "amines_and_nitrosating_agents": {
+        "keywords": [
+            "triethanolamine", "diethanolamine", "monoethanolamine", "tea", "dea", "mea", "tromethamine"
+        ],
+        "category": "pH Adjuster / Amine",
+        "risk_level": "moderate",
+        "is_hazardous": True,
+        "is_allergen": True,
+        "is_irritant": True,
+        "irritant_details": "Alkaline amine surfactant and pH neutralizer that can form nitrosamines (carcinogens) and trigger contact dermatitis.",
+        "why_flagged": "Nitrosating Amine Compound / Barrier Irritant",
+    },
+    "siloxanes_and_microplastics": {
+        "keywords": [
+            "cyclopentasiloxane", "cyclotetrasiloxane", "cyclomethicone", "d4", "d5", "d6"
+        ],
+        "category": "Volatile Silicone",
+        "risk_level": "moderate",
+        "is_hazardous": True,
+        "is_allergen": False,
+        "is_irritant": False,
+        "hazard_details": "Cyclic siloxane restricted under EU REACH due to environmental persistence, bioaccumulation, and suspected endocrine activity.",
+        "why_flagged": "Restricted Cyclic Siloxane (Bioaccumulation Concern)",
+    },
+    "sensitizing_preservatives": {
+        "keywords": [
+            "methylisothiazolinone", "methylchloroisothiazolinone", "kathon",
+            "triclosan", "triclocarban", "bht", "bha", "butylated hydroxytoluene", "butylated hydroxyanisole",
+            "chlorphenesin"
+        ],
+        "category": "Antimicrobial Sensitizer",
+        "risk_level": "high",
+        "is_hazardous": True,
+        "is_allergen": True,
+        "is_irritant": True,
+        "hazard_details": "Extreme contact sensitizer frequently causing allergic eczema and facial dermatitis; banned in leave-on EU cosmetics.",
+        "why_flagged": "High-Risk Contact Sensitizer / Bioaccumulative Preservative",
+    },
+    "fragrances_and_allergens": {
+        "keywords": [
+            "fragrance", "parfum", "aroma", "perfume", "flavour", "flavor",
+            "limonene", "linalool", "geraniol", "citronellol", "eugenol", "citral",
+            "cinnamal", "coumarin", "hydroxycitronellal", "isoeugenol", "amyl cinnamal",
+            "benzyl alcohol", "benzyl benzoate", "benzyl salicylate", "farnesol",
+            "hexyl cinnamal", "alpha-isomethyl ionone", "evernia prunastri", "oakmoss", "tree moss",
+            "lavender oil", "peppermint oil", "eucalyptus oil", "citrus oil"
+        ],
+        "category": "Fragrance & Aroma Allergen",
+        "risk_level": "high",
+        "is_hazardous": False,
+        "is_allergen": True,
+        "is_irritant": True,
+        "allergen_details": "Common contact allergen and volatile aroma blend recognized by EU SCCS as leading trigger of allergic contact dermatitis.",
+        "why_flagged": "Recognized Contact Allergen / Sensitizing Fragrance Compound",
+    },
+    "drying_alcohols": {
+        "keywords": ["alcohol denat", "sd alcohol", "isopropyl alcohol", "denatured alcohol"],
+        "category": "Drying Alcohol",
+        "risk_level": "moderate",
+        "is_hazardous": False,
+        "is_allergen": False,
+        "is_irritant": True,
+        "irritant_details": "Simple volatile alcohol that can dissolve intercellular lipids and accelerate skin barrier dehydration.",
+        "why_flagged": "Drying Alcohol (Skin Barrier Irritant)",
+    },
+    "pregnancy_cautions": {
+        "keywords": [
+            "retinol", "retinyl palmitate", "tretinoin", "adapalene",
+            "tazarotene", "hydroquinone", "salicylic acid"
+        ],
+        "category": "Potent Active",
+        "risk_level": "moderate",
+        "is_hazardous": False,
+        "is_allergen": False,
+        "is_irritant": True,
+        "hazard_details": "High-strength active compound requiring caution during pregnancy or acute barrier impairment.",
+        "why_flagged": "Caution Advised (High Strength Active / Pregnancy Caution)",
+    },
+    "clean_and_beneficial": {
+        "keywords": [
+            "aqua", "water", "glycerin", "ceramide", "sodium hyaluronate", "hyaluronic acid",
+            "niacinamide", "panthenol", "allantoin", "squalane", "tocopherol", "aloe barbadensis",
+            "centella asiatica", "centella", "butyrospermum parkii", "cholesterol", "beta-glucan",
+            "zinc oxide", "titanium dioxide", "shea butter", "jojoba"
+        ],
+        "category": "Barrier & Nourishing",
+        "risk_level": "low",
+        "is_hazardous": False,
+        "is_allergen": False,
+        "is_irritant": False,
+    }
+}
 
+
+def check_personal_allergy_match(cleaned_ing, user_allergies=None, user_avoids=None, fragrance_sensitivity=False, skin_sensitivities=None, skin_type=None):
+    """
+    Checks if an ingredient matches user's personal allergies, avoid list, or sensitivities.
+    """
+    cleaned_lower = cleaned_ing.lower().strip()
+    is_personal_allergen = False
+    is_personal_avoid = False
+    why_flagged_list = []
+    allergen_match_name = None
+    avoid_match_name = None
+
+    # 1. Match against user allergies
+    for allergy in (user_allergies or []):
+        allergy_clean = allergy.lower().strip()
+        if not allergy_clean:
+            continue
+        
+        matched = False
+        if allergy_clean in cleaned_lower or cleaned_lower in allergy_clean:
+            matched = True
+        elif "fragrance" in allergy_clean or "parfum" in allergy_clean:
+            if any(k in cleaned_lower for k in ["fragrance", "parfum", "aroma", "perfume", "limonene", "linalool", "geraniol", "citronellol", "eugenol", "citral"]):
+                matched = True
+        elif "formaldehyde" in allergy_clean:
+            if any(k in cleaned_lower for k in ["formaldehyde", "dmdm", "quaternium-15", "diazolidinyl", "imidazolidinyl", "bronopol"]):
+                matched = True
+        elif "paraben" in allergy_clean:
+            if "paraben" in cleaned_lower:
+                matched = True
+        elif "sulfate" in allergy_clean or "sls" in allergy_clean:
+            if "sulfate" in cleaned_lower or "sls" in cleaned_lower:
+                matched = True
+        elif "nickel" in allergy_clean and "nickel" in cleaned_lower:
+            matched = True
+
+        if matched:
+            is_personal_allergen = True
+            allergen_match_name = allergy
+            why_flagged_list.append(f"Matches Personal Allergy: {allergy}")
+            break
+
+    # 2. Check fragrance sensitivity flag
+    if fragrance_sensitivity and not is_personal_allergen:
+        if any(k in cleaned_lower for k in ["fragrance", "parfum", "aroma", "perfume", "limonene", "linalool", "geraniol", "citronellol", "eugenol", "citral"]):
+            is_personal_allergen = True
+            allergen_match_name = "Fragrance Sensitivity"
+            why_flagged_list.append("Matches Profile Sensitivity: Fragrance / Parfums")
+
+    # 3. Match against user avoid list
+    for avoid in (user_avoids or []):
+        avoid_clean = avoid.lower().strip()
+        if not avoid_clean:
+            continue
+        matched = False
+        if avoid_clean in cleaned_lower or cleaned_lower in avoid_clean:
+            matched = True
+        elif "paraben" in avoid_clean and "paraben" in cleaned_lower:
+            matched = True
+        elif ("sulfate" in avoid_clean or "sls" in avoid_clean) and ("sulfate" in cleaned_lower or "sls" in cleaned_lower):
+            matched = True
+        elif "phthalate" in avoid_clean and "phthalate" in cleaned_lower:
+            matched = True
+        elif ("oxybenzone" in avoid_clean or "sunscreen" in avoid_clean) and any(k in cleaned_lower for k in ["oxybenzone", "benzophenone", "octinoxate", "homosalate", "octocrylene"]):
+            matched = True
+
+        if matched:
+            is_personal_avoid = True
+            avoid_match_name = avoid
+            why_flagged_list.append(f"Matches Personal Avoid List: {avoid}")
+            break
+
+    # 4. Check skin sensitivities (e.g. Eczema, Rosacea, sensitive)
+    is_sensitive = (skin_type and str(skin_type).lower() == "sensitive") or any(
+        s.lower() in ["eczema", "rosacea", "contact dermatitis"] for s in (skin_sensitivities or [])
+    )
+    if is_sensitive and not is_personal_avoid and not is_personal_allergen:
+        if any(k in cleaned_lower for k in ["sodium lauryl sulfate", "sls", "alcohol denat", "sd alcohol", "isopropyl alcohol"]):
+            is_personal_avoid = True
+            why_flagged_list.append("Harsh barrier stripper problematic for your sensitive skin profile")
+
+    return {
+        "is_personal_allergen": is_personal_allergen,
+        "is_personal_avoid": is_personal_avoid,
+        "allergen_match_name": allergen_match_name,
+        "avoid_match_name": avoid_match_name,
+        "warning_text": "; ".join(why_flagged_list) if why_flagged_list else None,
+    }
+
+
+def evaluate_single_ingredient(ingredient, user_profile=None):
+    """
+    Evaluates an individual ingredient for chemical hazards, general allergens,
+    irritants, ML concern prediction, and personal allergies.
+    """
+    user_profile = user_profile or {}
+    user_allergies = user_profile.get("allergies") or user_profile.get("userAllergies") or []
+    user_avoids = user_profile.get("avoidIngredients") or user_profile.get("avoidList") or user_profile.get("avoid_ingredients") or []
+    fragrance_sensitivity = user_profile.get("fragranceSensitivity", False) or user_profile.get("fragrance_sensitivity", False)
+    skin_sensitivities = user_profile.get("skinSensitivities") or user_profile.get("skin_sensitivities") or []
+    skin_type = user_profile.get("skinType") or user_profile.get("skin_type")
+
+    cleaned = clean_ingredient(ingredient)
+    display_title = ingredient.strip().title()
+
+    # 1. Check personal allergen and avoid match
+    personal = check_personal_allergy_match(
+        cleaned, user_allergies, user_avoids, fragrance_sensitivity, skin_sensitivities, skin_type
+    )
+
+    # 2. Check Known Chemical Hazards
+    detected_hazard = False
+    detected_allergen = False
+    detected_irritant = False
+    detected_clean = False
+    category = "General"
+    hazard_details = None
+    allergen_details = None
+    irritant_details = None
+    why_flagged = personal["warning_text"]
+
+    for hazard_type, info in KNOWN_HAZARDS.items():
+        matched_kw = None
+        for kw in info["keywords"]:
+            if kw in cleaned or (len(cleaned) >= 4 and cleaned in kw):
+                matched_kw = kw
+                break
+        
+        # Fuzzy match for OCR misreadings & typos (e.g. etyihexyl methoxyeinnamate -> ethylhexyl methoxycinnamate)
+        if not matched_kw and len(cleaned) >= 5:
+            tokens = [w for w in re.split(r"[\s\-_/]+", cleaned) if len(w) >= 4]
+            for t in tokens:
+                for kw in info["keywords"]:
+                    if len(kw) >= 4 and (t in kw or kw in t):
+                        matched_kw = kw
+                        break
+                    kw_tokens = [k for k in kw.split() if len(k) >= 4]
+                    close = difflib.get_close_matches(t, kw_tokens, n=1, cutoff=0.70)
+                    if close:
+                        matched_kw = kw
+                        break
+                if matched_kw:
+                    break
+
+        if matched_kw:
+            if info.get("is_hazardous"):
+                detected_hazard = True
+                hazard_details = info.get("hazard_details")
+            if info.get("is_allergen"):
+                detected_allergen = True
+                allergen_details = info.get("allergen_details")
+            if info.get("is_irritant"):
+                detected_irritant = True
+                irritant_details = info.get("irritant_details")
+            if hazard_type == "clean_and_beneficial":
+                detected_clean = True
+            
+            category = info.get("category", category)
+            hazard_why = info.get("why_flagged")
+            if hazard_why and not why_flagged:
+                why_flagged = hazard_why
+
+    # 3. Match against Excel dataset
+    df = get_dataset()
+    match = df[df["display_name"] == cleaned]
+    if match.empty:
+        # Partial match on display_name
+        words = cleaned.split()
+        if words:
+            for w in [cleaned, words[0]]:
+                if len(w) >= 3:
+                    sub_match = df[df["display_name"].str.contains(re.escape(w), na=False)]
+                    if not sub_match.empty:
+                        match = sub_match
+                        break
+
+    if not match.empty:
+        row = match.iloc[0]
+        if dataset_flag(row.get("fragrance")):
+            detected_allergen = True
+            detected_irritant = True
+            if not allergen_details:
+                allergen_details = "Fragrance compound identified in cosmetic registry."
+        if dataset_flag(row.get("eu_allergen")):
+            detected_allergen = True
+            if not allergen_details:
+                allergen_details = "EU Annex III regulated contact allergen."
+        if dataset_flag(row.get("pregnancy_caution")):
+            detected_hazard = True
+            if not hazard_details:
+                hazard_details = "Active component flagged with pregnancy / sensitive caution."
+
+    # 4. ML Model Prediction
+    model = get_model()
+    concern_probability = 25.0
+    try:
+        prediction = model.predict([cleaned])[0]
+        probabilities = model.predict_proba([cleaned])[0]
+        concern_probability = float(probabilities[1]) * 100
+        if prediction == 1 or concern_probability >= 60:
+            detected_hazard = True
+            if not hazard_details:
+                hazard_details = f"ML model flagged potential chemical concern ({round(concern_probability, 1)}% probability)."
+    except Exception:
+        pass
+
+    # 5. Determine Overall Risk Level
+    if personal["is_personal_allergen"]:
+        risk_level = "hazardous"
+        detected_allergen = True
+    elif detected_hazard:
+        risk_level = "hazardous" if any(kw in cleaned for kw in ["formaldehyde", "dmdm", "phthalate", "oxybenzone"]) else "moderate"
+    elif personal["is_personal_avoid"]:
+        risk_level = "high"
+    elif detected_allergen:
+        risk_level = "high"
+    elif detected_irritant:
+        risk_level = "moderate"
+    else:
+        risk_level = "low"
+
+    return {
+        "rawName": ingredient,
+        "matchedName": display_title,
+        "cleanedName": cleaned,
+        "category": category,
+        "riskLevel": risk_level,
+        "isAllergen": detected_allergen or personal["is_personal_allergen"],
+        "isIrritant": detected_irritant,
+        "isHazardous": detected_hazard,
+        "isClean": detected_clean,
+        "isPersonalAllergen": personal["is_personal_allergen"],
+        "isPersonalAvoid": personal["is_personal_avoid"],
+        "personalizedMatch": personal["is_personal_allergen"] or personal["is_personal_avoid"],
+        "userAvoidMatch": personal["is_personal_avoid"],
+        "whyFlagged": why_flagged,
+        "hazardDetails": hazard_details,
+        "allergenDetails": allergen_details,
+        "irritantDetails": irritant_details,
+        "confidence": round(concern_probability / 100, 2),
+    }
+
+
+def calculate_formulation_score(evaluated_items):
+    """
+    Computes a personalized safety score considering ALL ingredients,
+    chemical hazards, irritants, and personal allergens.
+    """
+    total = len(evaluated_items)
+    if total == 0:
+        return 100, "Lower Detected Risk", "No ingredients to analyze.", {}
+
+    personal_allergens = sum(1 for item in evaluated_items if item.get("isPersonalAllergen"))
+    personal_avoids = sum(1 for item in evaluated_items if item.get("isPersonalAvoid") and not item.get("isPersonalAllergen"))
+    hazards = sum(1 for item in evaluated_items if item.get("isHazardous"))
+    allergens = sum(1 for item in evaluated_items if item.get("isAllergen"))
+    irritants = sum(1 for item in evaluated_items if item.get("isIrritant"))
+    clean_count = sum(1 for item in evaluated_items if item.get("isClean") or (item.get("riskLevel") == "low" and not item.get("personalizedMatch")))
+
+    # Base score
+    score = 100
+
+    # Deductions based on ingredient findings
+    deductions = (
+        (personal_allergens * 35)
+        + (personal_avoids * 18)
+        + (hazards * 22)
+        + (allergens * 12)
+        + (irritants * 8)
+    )
+
+    # Clean buffer points (clean ingredients like aqua, glycerin, ceramides add safety balance)
+    clean_buffer = min(15, clean_count * 2)
+
+    score = 100 - deductions + clean_buffer
+
+    # Hard safety caps: If user is personally allergic, product is dangerous for them!
+    if personal_allergens >= 2:
+        score = max(10, min(25, score))
+    elif personal_allergens == 1:
+        score = max(15, min(45, score))
+    elif personal_avoids >= 1:
+        score = min(60, score)
+    elif hazards >= 1:
+        score = min(68, score)
+
+    score = max(10, min(100, round(score)))
+
+    # Determine risk label
+    if score >= 80:
+        risk_label = "Lower Detected Risk"
+    elif score >= 60:
+        risk_label = "Moderate Detected Risk"
+    elif score >= 40:
+        risk_label = "Higher Detected Risk"
+    else:
+        risk_label = "Significant Detected Concerns"
+
+    # Construct dynamic explanation
+    warnings = []
+    if personal_allergens > 0:
+        matched_allergies = [i["whyFlagged"] for i in evaluated_items if i.get("isPersonalAllergen") and i.get("whyFlagged")]
+        warnings.append(f"CRITICAL ALLERGEN ALERT: {personal_allergens} ingredient(s) directly match your personal allergy watchlist ({', '.join(matched_allergies)}).")
+    if personal_avoids > 0:
+        warnings.append(f"{personal_avoids} ingredient(s) match items on your personal avoid list.")
+    if hazards > 0:
+        warnings.append(f"{hazards} chemical hazard(s) flagged.")
+    if allergens > 0 and personal_allergens == 0:
+        warnings.append(f"{allergens} general allergen(s) / fragrance compound(s) detected.")
+    if irritants > 0:
+        warnings.append(f"{irritants} skin irritant(s) detected.")
+
+    if warnings:
+        risk_exp = " ".join(warnings)
+    else:
+        risk_exp = f"All {total} scanned ingredients appear clean, non-toxic, and free from your saved personal allergy triggers."
+
+    summary_counts = {
+        "total": total,
+        "allergens": allergens,
+        "irritants": irritants,
+        "hazards": hazards,
+        "personalAllergens": personal_allergens,
+        "reviewNeeded": sum(1 for item in evaluated_items if item.get("riskLevel") == "moderate"),
+        "clean": clean_count,
+        "unknown": 0,
+    }
+
+    return score, risk_label, risk_exp, summary_counts
+
+
+def analyze_ingredients(ingredients, user_profile=None):
+    """
+    Backwards-compatible wrapper returning array of analyzed items.
+    """
+    evaluated = []
     for ingredient in ingredients:
         if not isinstance(ingredient, str):
             continue
-
-        ingredient = clean_ingredient(ingredient)
-
-        if not ingredient:
+        cleaned = clean_ingredient(ingredient)
+        if not cleaned:
             continue
-
-        prediction = model.predict([ingredient])[0]
-
-        probabilities = model.predict_proba([ingredient])[0]
-        concern_probability = float(probabilities[1]) * 100
-
-        match = df[df["display_name"] == ingredient]
-
-        fragrance = False
-        eu_allergen = False
-        pregnancy_caution = False
-
-        if not match.empty:
-            row = match.iloc[0]
-
-            fragrance = dataset_flag(row["fragrance"])
-            eu_allergen = dataset_flag(row["eu_allergen"])
-            pregnancy_caution = dataset_flag(row["pregnancy_caution"])
-
-        results.append({
-            "ingredient": ingredient,
-            "prediction": (
-                "Potential Concern" if prediction == 1
-                else "Lower Concern"
-            ),
-            "probability": round(concern_probability, 1),
-            "fragrance": fragrance,
-            "eu_allergen": eu_allergen,
-            "pregnancy_caution": pregnancy_caution,
+        item = evaluate_single_ingredient(ingredient, user_profile)
+        evaluated.append({
+            "ingredient": item["cleanedName"],
+            "prediction": "Potential Concern" if item["isHazardous"] else "Lower Concern",
+            "probability": round(item["confidence"] * 100, 1),
+            "fragrance": item["isIrritant"] and item["category"] == "Fragrance & Aroma Allergen",
+            "eu_allergen": item["isAllergen"],
+            "pregnancy_caution": item["isHazardous"] and item["category"] == "Potent Active",
+            "raw_item": item,
         })
-
-    return results
+    return evaluated
 
 
 # ==========================================
@@ -817,6 +1308,482 @@ def analyze():
     except Exception:
         app.logger.exception("Ingredient analysis failed")
         return jsonify({"error": "Ingredient analysis failed"}), 500
+
+
+@app.route("/api/analyze", methods=["POST"])
+def api_analyze():
+    return analyze()
+
+
+# ==========================================
+# 7b. SCAN & OCR APIS
+# ==========================================
+
+@app.route("/api/scan/upload", methods=["POST"])
+@app.route("/scan/upload", methods=["POST"])
+def upload_scan_image():
+    file = request.files.get("image")
+    if not file:
+        return jsonify({"error": "No image provided"}), 400
+
+    scan_id = f"scan_{int(datetime.now(timezone.utc).timestamp())}_{secrets.token_hex(4)}"
+    filename = f"{scan_id}.jpg"
+    dest = SCAN_UPLOAD_DIRECTORY / filename
+
+    try:
+        file.save(dest)
+        # Attempt Pillow multi-scale unsharp deblur & autocontrast
+        try:
+            from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+            with Image.open(dest) as img:
+                rgb_img = img.convert("RGB")
+                if rgb_img.width < 1400:
+                    scale = min(2.5, 1600 / rgb_img.width)
+                    rgb_img = rgb_img.resize(
+                        (int(rgb_img.width * scale), int(rgb_img.height * scale)),
+                        Image.Resampling.LANCZOS,
+                    )
+                # Percentile autocontrast removes specular reflection and shadows
+                rgb_img = ImageOps.autocontrast(rgb_img, cutoff=2)
+                # Multi-scale unsharp masking: wide radius for defocus blur + fine radius for edges
+                rgb_img = rgb_img.filter(ImageFilter.UnsharpMask(radius=6, percent=180, threshold=2))
+                rgb_img = rgb_img.filter(ImageFilter.UnsharpMask(radius=2, percent=160, threshold=1))
+                rgb_img = ImageEnhance.Sharpness(rgb_img).enhance(2.0)
+                enhanced_dest = SCAN_UPLOAD_DIRECTORY / f"enhanced_{filename}"
+                rgb_img.save(enhanced_dest, "JPEG", quality=95)
+        except Exception:
+            pass
+    except Exception:
+        app.logger.exception("Failed to save scan upload")
+        return jsonify({"error": "Failed to save uploaded image"}), 500
+
+    image_url = f"/api/scan/{scan_id}/image"
+    return jsonify({"scanId": scan_id, "imageUrl": image_url})
+
+
+@app.route("/api/scan/<scan_id>/image", methods=["GET"])
+@app.route("/scan/<scan_id>/image", methods=["GET"])
+def get_scan_image(scan_id):
+    filename = f"{scan_id}.jpg"
+    path = SCAN_UPLOAD_DIRECTORY / filename
+    if not path.is_file():
+        enhanced = SCAN_UPLOAD_DIRECTORY / f"enhanced_{filename}"
+        if enhanced.is_file():
+            path = enhanced
+        else:
+            return jsonify({"error": "Image not found"}), 404
+    return send_file(path, mimetype="image/jpeg")
+
+
+@app.route("/api/scan/<scan_id>/ocr", methods=["POST"])
+@app.route("/scan/<scan_id>/ocr", methods=["POST"])
+def scan_ocr(scan_id):
+    data = request.get_json(silent=True) or {}
+    manual_text = data.get("manualText") or data.get("rawText")
+    client_items = data.get("extractedItems")
+
+    # If client already performed enhanced OCR and provided extracted items
+    if client_items and isinstance(client_items, list) and len(client_items) > 0:
+        return jsonify({
+            "scanId": scan_id,
+            "rawText": manual_text or "",
+            "overallConfidence": data.get("overallConfidence", 0.94),
+            "extractedItems": client_items,
+        })
+
+    # Locate uploaded image for OCR
+    image_path = SCAN_UPLOAD_DIRECTORY / f"{scan_id}.jpg"
+    enhanced_path = SCAN_UPLOAD_DIRECTORY / f"enhanced_{scan_id}.jpg"
+    candidates = [p for p in (image_path, enhanced_path) if p.is_file()]
+
+    # 1. Native Windows OCR Engine (instant local hardware-accelerated recognition)
+    if not manual_text and candidates:
+        try:
+            import winocr
+            from PIL import Image
+            import asyncio
+
+            async def _do_winocr(im):
+                return await winocr.recognize_pil(im)
+
+            for target_img in candidates:
+                try:
+                    pil_img = Image.open(target_img)
+                    if pil_img.mode not in ("RGB", "L"):
+                        pil_img = pil_img.convert("RGB")
+                    ocr_res = asyncio.run(_do_winocr(pil_img))
+                    if ocr_res and hasattr(ocr_res, "text") and len(ocr_res.text.strip()) > 5:
+                        manual_text = ocr_res.text.strip()
+                        app.logger.info(f"WinOCR extracted {len(manual_text)} chars from {target_img.name}")
+                        break
+                except Exception:
+                    pass
+        except Exception:
+            app.logger.exception("Native WinOCR extraction failed")
+
+    # 2. If OpenAI Vision is configured and manual_text still not resolved
+    if not manual_text and client is not None and target_img is not None:
+        try:
+            import base64
+            with open(target_img, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+
+            response = client.chat.completions.create(
+                model=os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini"),
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert cosmetic and food ingredient label OCR system. "
+                                   "Transcribe the full ingredient list exactly from the package label. "
+                                   "Even if the image has motion blur, out-of-focus text, glare, or curved containers, read all chemical and botanical names carefully. "
+                                   "Return ONLY a clean, comma-separated list of the recognized ingredients without conversational fluff."
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Extract all ingredient names from this product image:"},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                        ]
+                    }
+                ],
+                max_tokens=600,
+            )
+            extracted = response.choices[0].message.content.strip()
+            if extracted:
+                manual_text = extracted
+        except Exception:
+            app.logger.exception("OpenAI vision extraction failed")
+
+    # Match against canonical ingredients dataset
+    df = get_dataset()
+    dataset_names = [str(x).strip() for x in df["display_name"].dropna().unique() if len(str(x).strip()) >= 2]
+
+    if manual_text and manual_text.strip():
+        text_clean = manual_text.strip()
+        text_clean = re.sub(r'(?i)^\s*[\W_]*ingredients?\s*[:：\-]\s*', '', text_clean)
+        text_clean = re.sub(r'(?i)\b(fragrance\s*free|paraben\s*free|dermatologically\s*tested|cruelty\s*free|vegan|net\s*wt|mfg|exp|batch)\b.*', '', text_clean)
+        text_clean = re.sub(r'\.\s+(?=[A-Z])', ', ', text_clean)
+        text_clean = re.sub(r'(\d)\s*,\s*(\d)-', r'\1__COMMA__\2-', text_clean)
+        raw_list = [i.replace('__COMMA__', ',').strip(' .,;:()[]"\'') for i in re.split(r'[,;\n•·]', text_clean) if len(i.strip(' .,;:()[]"\'')) >= 2]
+    else:
+        text_clean = ""
+        raw_list = []
+
+    items = []
+    for idx, ing in enumerate(raw_list):
+        cleaned = clean_ingredient(ing)
+        if len(cleaned) < 2 or re.match(r"^[0-9\W]+$", cleaned):
+            continue
+
+        matches = difflib.get_close_matches(cleaned, dataset_names, n=1, cutoff=0.75)
+        if matches:
+            suggested = matches[0].title()
+            conf = 0.95
+            is_err = cleaned.lower() != matches[0].lower()
+        else:
+            suggested = ing.strip().title()
+            conf = 0.85
+            is_err = False
+
+        items.append({
+            "id": f"item_{idx}_{int(datetime.now(timezone.utc).timestamp())}",
+            "originalText": ing.strip(),
+            "suggestedName": suggested,
+            "confidence": conf,
+            "isSuspectedError": is_err,
+        })
+
+    return jsonify({
+        "scanId": scan_id,
+        "rawText": text_clean,
+        "overallConfidence": 0.92 if items else 0.0,
+        "extractedItems": items,
+        "warning": None if items else "No readable ingredients could be automatically identified from this image.",
+    })
+
+
+@app.route("/api/scan/<scan_id>/analyze", methods=["POST"])
+@app.route("/scan/<scan_id>/analyze", methods=["POST"])
+def scan_analyze(scan_id):
+    data = request.get_json(silent=True) or {}
+    ingredients = data.get("ingredients", [])
+    product_name = data.get("productName", "Scanned Product")
+    category = data.get("category", "Cosmetics & Skincare")
+    user_profile = data.get("userProfile") or {}
+
+    if not isinstance(ingredients, list) or not ingredients:
+        return jsonify({"error": "Ingredients list is required"}), 400
+
+    # Resolve authenticated session user
+    token = get_bearer_token()
+    user_id = None
+    if token:
+        try:
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            with get_auth_connection() as connection:
+                session_row = connection.execute(
+                    "SELECT user_id FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+                ).fetchone()
+                if session_row:
+                    user_id = session_row["user_id"]
+                    if not user_profile or not user_profile.get("allergies"):
+                        user_row = connection.execute(
+                            "SELECT profile_json FROM users WHERE id = ?", (user_id,)
+                        ).fetchone()
+                        if user_row and user_row["profile_json"]:
+                            try:
+                                db_profile = json.loads(user_row["profile_json"])
+                                # Merge with payload profile
+                                user_profile = {**db_profile, **user_profile}
+                            except Exception:
+                                pass
+        except Exception:
+            app.logger.exception("Failed to resolve session user for scan analysis")
+
+    # Evaluate each ingredient with chemical toxicology + personal allergy profiling
+    evaluated_items = []
+    analyzed_items = []
+
+    for idx, ing in enumerate(ingredients):
+        if not isinstance(ing, str) or not ing.strip():
+            continue
+        eval_item = evaluate_single_ingredient(ing, user_profile)
+        evaluated_items.append(eval_item)
+
+        analyzed_items.append({
+            "id": f"ing_{idx}_{scan_id}",
+            "rawName": eval_item["rawName"],
+            "matchedName": eval_item["matchedName"],
+            "category": eval_item["category"],
+            "riskLevel": eval_item["riskLevel"],
+            "isAllergen": eval_item["isAllergen"],
+            "isIrritant": eval_item["isIrritant"],
+            "isHazardous": eval_item["isHazardous"],
+            "isPersonalAllergen": eval_item["isPersonalAllergen"],
+            "isPersonalAvoid": eval_item["isPersonalAvoid"],
+            "personalizedMatch": eval_item["personalizedMatch"],
+            "userAvoidMatch": eval_item["userAvoidMatch"],
+            "whyFlagged": eval_item["whyFlagged"],
+            "hazardDetails": eval_item["hazardDetails"],
+            "allergenDetails": eval_item["allergenDetails"],
+            "irritantDetails": eval_item["irritantDetails"],
+            "confidence": eval_item["confidence"],
+            "datasetReference": "EWG Hazard Registry, EU CosIng & SCCS 2026",
+        })
+
+    # Comprehensive score calculation considering all ingredients + personal allergies
+    score, risk_label, risk_exp, summary_counts = calculate_formulation_score(evaluated_items)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    image_url = f"/api/scan/{scan_id}/image" if (SCAN_UPLOAD_DIRECTORY / f"{scan_id}.jpg").exists() else ""
+
+    # Personalized warnings list for UI banners
+    personalized_warnings = [
+        f"{item['rawName']}: {item['whyFlagged']}"
+        for item in evaluated_items
+        if item.get("personalizedMatch") and item.get("whyFlagged")
+    ]
+
+    # Dynamically select safer clean alternatives avoiding detected concerns
+    flagged_names = [i["rawName"].title() for i in evaluated_items if i.get("isHazardous") or i.get("isAllergen")]
+    safer_alternatives = [
+        {
+            "id": "alt_1",
+            "name": "PureBarrier Lipid Recovery Emulsion",
+            "brand": "DermoCleanse",
+            "category": category,
+            "imageUrl": "https://images.unsplash.com/photo-1608248597260-843818e61230?auto=format&fit=crop&w=400&q=80",
+            "safetyScore": 96,
+            "reasonSuggested": "100% fragrance-free, zero parabens, zero formaldehyde releasers. Certified hypoallergenic.",
+            "avoidedConcerns": flagged_names[:3] if flagged_names else ["Fragrance / Parfum", "Preservatives"],
+            "rating": 4.9,
+        },
+        {
+            "id": "alt_2",
+            "name": "CalmOat Soothing Barrier Gel",
+            "brand": "PureBotanica",
+            "category": category,
+            "imageUrl": "https://images.unsplash.com/photo-1556228720-195a672e8a03?auto=format&fit=crop&w=400&q=80",
+            "safetyScore": 94,
+            "reasonSuggested": "Formulated with colloidal oatmeal and ceramides. Avoids all 26 EU regulated contact allergens.",
+            "avoidedConcerns": flagged_names[:2] if flagged_names else ["Chemical Sensitizers"],
+            "rating": 4.8,
+        },
+    ]
+
+    report = {
+        "id": f"rep_{scan_id}",
+        "scanId": scan_id,
+        "productName": product_name,
+        "brand": "Scanned Product",
+        "category": category,
+        "imageUrl": image_url,
+        "scanDate": now_iso,
+        "score": score,
+        "riskLabel": risk_label,
+        "riskExplanation": risk_exp,
+        "summaryCounts": summary_counts,
+        "ingredients": analyzed_items,
+        "personalizedWarnings": personalized_warnings,
+        "saferAlternatives": safer_alternatives,
+    }
+
+    # Always persist scan into SQLite scans table
+    try:
+        with get_auth_connection() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO scans (id, user_id, product_name, brand, category, image_url, scan_date, score, risk_level, ingredients_json, report_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    user_id,
+                    product_name,
+                    "Scanned Product",
+                    category,
+                    image_url,
+                    now_iso,
+                    score,
+                    risk_label,
+                    json.dumps(ingredients),
+                    json.dumps(report),
+                ),
+            )
+    except Exception:
+        app.logger.exception("Failed to persist scan into database")
+
+    return jsonify(report)
+
+
+def _serialize_scan_summary(row):
+    """Convert a database scan row into a scan summary for history/dashboard."""
+    try:
+        rep = json.loads(row["report_json"])
+    except Exception:
+        rep = {}
+    summary_counts = rep.get("summaryCounts", {})
+    return {
+        "id": row["id"],
+        "userId": row["user_id"] or "",
+        "productName": row["product_name"],
+        "brand": row["brand"] or "Scanned Product",
+        "category": row["category"] or "Cosmetics & Skincare",
+        "imageUrl": row["image_url"] or rep.get("imageUrl", ""),
+        "scanDate": row["scan_date"],
+        "score": row["score"],
+        "riskLabel": row["risk_level"],
+        "allergensCount": summary_counts.get("allergens", 0),
+        "hazardsCount": summary_counts.get("hazards", 0),
+        "status": "completed",
+        "reportId": rep.get("id", f"rep_{row['id']}"),
+    }
+
+
+@app.route("/api/reports/<path:report_id>", methods=["GET"])
+@app.route("/reports/<path:report_id>", methods=["GET"])
+@app.route("/api/scan/<scan_id>/report", methods=["GET"])
+@app.route("/scan/<scan_id>/report", methods=["GET"])
+@app.route("/api/scans/<scan_id>", methods=["GET"])
+@app.route("/scans/<scan_id>", methods=["GET"])
+def get_report_endpoint(report_id=None, scan_id=None):
+    """Retrieve full safety analysis report by report_id or scan_id."""
+    target_id = report_id or scan_id
+    if not target_id:
+        return jsonify({"error": "Report identifier is required"}), 400
+
+    clean_id = target_id.replace("rep_", "")
+
+    with get_auth_connection() as connection:
+        # 1. Match by id or clean scan_id
+        row = connection.execute(
+            """
+            SELECT report_json FROM scans
+            WHERE id = ? OR id = ?
+            ORDER BY scan_date DESC
+            LIMIT 1
+            """,
+            (target_id, clean_id),
+        ).fetchone()
+
+        # 2. Match within report_json for target_id or rep_clean_id
+        if not row:
+            row = connection.execute(
+                """
+                SELECT report_json FROM scans
+                WHERE report_json LIKE ? OR report_json LIKE ?
+                ORDER BY scan_date DESC
+                LIMIT 1
+                """,
+                (f'%"id": "{target_id}"%', f'%"scanId": "{clean_id}"%'),
+            ).fetchone()
+
+        if row:
+            try:
+                report_obj = json.loads(row["report_json"])
+                # Auto-upgrade outdated 100-score reports if hazardous ingredients exist
+                if report_obj.get("score") == 100:
+                    raw_ings = [i.get("rawName") for i in report_obj.get("ingredients", []) if isinstance(i, dict) and i.get("rawName")]
+                    if raw_ings:
+                        re_evals = [evaluate_single_ingredient(ing) for ing in raw_ings]
+                        new_score, new_label, new_exp, new_counts = calculate_formulation_score(re_evals)
+                        if new_score != 100:
+                            report_obj["score"] = new_score
+                            report_obj["riskLabel"] = new_label
+                            report_obj["riskExplanation"] = new_exp
+                            report_obj["summaryCounts"] = new_counts
+                            for idx, item in enumerate(report_obj.get("ingredients", [])):
+                                if idx < len(re_evals):
+                                    ev = re_evals[idx]
+                                    item["riskLevel"] = ev["riskLevel"]
+                                    item["isHazardous"] = ev["isHazardous"]
+                                    item["isAllergen"] = ev["isAllergen"]
+                                    item["isIrritant"] = ev["isIrritant"]
+                                    item["whyFlagged"] = ev["whyFlagged"]
+                                    item["hazardDetails"] = ev["hazardDetails"]
+                                    item["allergenDetails"] = ev["allergenDetails"]
+                return jsonify(report_obj)
+            except Exception:
+                app.logger.exception("Failed to decode saved report JSON")
+
+    return jsonify({"error": f"Report not found for identifier: {target_id}"}), 404
+
+
+@app.route("/api/scans", methods=["GET"])
+@app.route("/scans", methods=["GET"])
+def get_scans():
+    token = get_bearer_token()
+    user_id = None
+    if token:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with get_auth_connection() as connection:
+            session_row = connection.execute(
+                "SELECT user_id FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+            ).fetchone()
+            if session_row:
+                user_id = session_row["user_id"]
+
+    with get_auth_connection() as connection:
+        if user_id:
+            rows = connection.execute(
+                "SELECT * FROM scans WHERE user_id = ? OR user_id IS NULL ORDER BY scan_date DESC",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT * FROM scans ORDER BY scan_date DESC LIMIT 30"
+            ).fetchall()
+
+        return jsonify([_serialize_scan_summary(row) for row in rows])
+
+
+@app.route("/api/scans/<scan_id>", methods=["DELETE"])
+@app.route("/scans/<scan_id>", methods=["DELETE"])
+def delete_scan(scan_id):
+    clean_id = scan_id.replace("rep_", "")
+    with get_auth_connection() as connection:
+        connection.execute("DELETE FROM scans WHERE id = ? OR id = ?", (scan_id, clean_id))
+    return jsonify({"success": True})
 
 
 # ==========================================

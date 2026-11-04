@@ -34,7 +34,6 @@ export const ScanPage: React.FC = () => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
-  const [currentScanId, setCurrentScanId] = useState<string | null>(null);
 
   const samplePlaceholder = 'Aqua (Water), Glycerin, Fragrance / Parfum, Sodium Lauryl Sulfate, DMDM Hydantoin, Methylparaben, Tocopheryl Acetate, Botanical Ext 402X';
 
@@ -58,40 +57,41 @@ export const ScanPage: React.FC = () => {
     try {
       let scanId = `scan_${Date.now()}`;
       if (selectedFile) {
-        const uploadRes = await scanApi.uploadScanImage(selectedFile);
-        scanId = uploadRes.scanId;
+        try {
+          const uploadRes = await scanApi.uploadScanImage(selectedFile);
+          if (uploadRes && uploadRes.scanId) {
+            scanId = uploadRes.scanId;
+          }
+        } catch (uploadErr) {
+          console.warn('Backend upload skipped, processing locally with OCR engine:', uploadErr);
+        }
       }
-      setCurrentScanId(scanId);
-    } catch (err: any) {
-      console.error('Scan initiation failed', err);
-      setHasError(true);
-      setErrorMessage(err.message || 'Failed to initiate AI scan session.');
-      setIsProcessing(false);
-    }
-  };
 
-  const handleScanAnimationComplete = async () => {
-    if (!currentScanId) return;
+      const isImageScan = activeTab === 'upload' || activeTab === 'camera';
+      const ocrResult = await scanApi.performOCR(scanId, {
+        file: isImageScan ? selectedFile : undefined,
+        manualText: activeTab === 'manual' ? manualText : undefined,
+      });
 
-    try {
-      // Trigger OCR extraction
-      const ocrResult = await scanApi.performOCR(
-        currentScanId,
-        activeTab === 'manual' ? manualText : undefined
-      );
+      if (ocrResult.extractedItems && ocrResult.extractedItems.length > 0) {
+        showToast(`AI detected ${ocrResult.extractedItems.length} ingredients from label!`, 'success');
+      } else {
+        showToast('Low contrast or blurry text detected. Please verify or edit ingredients.', 'warning');
+      }
 
       // Save raw extracted state for OCR review page
-      sessionStorage.setItem(`labelcheck_ocr_${currentScanId}`, JSON.stringify({
+      sessionStorage.setItem(`labelcheck_ocr_${scanId}`, JSON.stringify({
         ocrResult,
         productName: productName || 'Scanned Packaged Product',
         category,
       }));
 
       setIsProcessing(false);
-      navigate(`/scan/review/${currentScanId}`);
+      navigate(`/scan/review/${scanId}`);
     } catch (err: any) {
+      console.error('Scan processing failed', err);
       setHasError(true);
-      setErrorMessage('OCR Extraction failed. Image may be blurry or illegible.');
+      setErrorMessage(err.message || 'OCR Extraction failed. Image may be blurry or illegible.');
       setIsProcessing(false);
     }
   };
@@ -99,7 +99,7 @@ export const ScanPage: React.FC = () => {
   if (isProcessing) {
     return (
       <div className="min-h-[80vh] flex items-center justify-center p-4">
-        <ScanProgress onComplete={handleScanAnimationComplete} />
+        <ScanProgress />
       </div>
     );
   }

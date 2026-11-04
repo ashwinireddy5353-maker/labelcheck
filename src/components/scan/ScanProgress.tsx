@@ -11,18 +11,19 @@ import {
 } from 'lucide-react';
 
 interface ScanProgressProps {
-  onComplete: () => void;
+  onComplete?: () => void;
+  statusMessage?: string;
 }
 
-export const ScanProgress: React.FC<ScanProgressProps> = ({ onComplete }) => {
+export const ScanProgress: React.FC<ScanProgressProps> = ({ onComplete, statusMessage }) => {
   const steps = [
     { title: 'Uploading image payload', icon: UploadCloud },
-    { title: 'Preprocessing & contrast enhancement', icon: Sparkles },
+    { title: 'Deblurring & contrast enhancement', icon: Sparkles },
     { title: 'Extracting text with AI OCR engine', icon: ScanText },
     { title: 'Cleaning & parsing ingredient names', icon: FileCheck2 },
     { title: 'Matching CosIng & EWG database entries', icon: Database },
     { title: 'Detecting allergens, irritants & chemical hazards', icon: ShieldAlert },
-    { title: 'Generating personalized safety report', icon: CheckCircle2 },
+    { title: 'Preparing ingredient review dashboard', icon: CheckCircle2 },
   ];
 
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
@@ -34,7 +35,9 @@ export const ScanProgress: React.FC<ScanProgressProps> = ({ onComplete }) => {
           return prev + 1;
         } else {
           clearInterval(interval);
-          setTimeout(onComplete, 400);
+          if (onComplete) {
+            setTimeout(onComplete, 400);
+          }
           return prev;
         }
       });
